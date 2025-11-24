@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -17,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/slack-go/slack"
 	"golang.org/x/net/html"
 )
@@ -33,8 +35,9 @@ type StoredData struct {
 
 type Config struct {
 	S3BucketName  string `json:"S3BucketName"`
-	S3ObjectKey   string `json:"S3ObjectKey"`
 	S3Region      string `json:"S3Region"`
+	S3Directory   string `json:"S3Directory"`
+	S3SeriesKey   string `json:"S3SeriesKey"`
 	SlackBotToken string `json:"SlackBotToken"`
 	SlackChannel  string `json:"SlackChannel"`
 }
@@ -58,6 +61,18 @@ func main() {
 }
 
 func initConfig() error {
+	if isLambda() {
+		appConfig = Config{
+			S3BucketName:  os.Getenv("S3_BUCKET_NAME"),
+			S3Region:      getAWSRegion(),
+			S3Directory:   os.Getenv("S3_DIRECTORY"),
+			S3SeriesKey:   os.Getenv("S3_SERIES_KEY"),
+			SlackBotToken: os.Getenv("SLACK_BOT_TOKEN"),
+			SlackChannel:  os.Getenv("SLACK_CHANNEL"),
+		}
+		return nil
+	}
+
 	data, err := os.ReadFile("config.json")
 	if err != nil {
 		return err
@@ -72,6 +87,16 @@ func initConfig() error {
 
 func isLambda() bool {
 	return os.Getenv("AWS_LAMBDA_FUNCTION_NAME") != ""
+}
+
+func getAWSRegion() string {
+	if region := os.Getenv("S3_REGION"); region != "" {
+		return region
+	}
+	if region := os.Getenv("AWS_REGION"); region != "" {
+		return region
+	}
+	return "ap-northeast-1"
 }
 
 func handler(ctx context.Context) (string, error) {
@@ -98,19 +123,12 @@ func processSeriesCheck(_ context.Context) (string, error) {
 
 	previousSeries, err := loadPreviousData(cfg)
 	if err != nil {
-		log.Printf("Warning: failed to load previous data: %v", err)
-		previousSeries = []SeriesData{}
+		return "", fmt.Errorf("failed to load previous data: %w", err)
 	}
 
-	added, removed := compareSeries(previousSeries, currentSeries)
-
-	if len(added) > 0 || len(removed) > 0 {
-		err = postToSlack(buildSlackMessage(added, removed))
-		if err != nil {
-			return "", fmt.Errorf("failed to notify Slack: %w", err)
-		}
-	} else {
-		log.Println("No changes detected")
+	err = handleChanges(previousSeries, currentSeries)
+	if err != nil {
+		return "", fmt.Errorf("failed to handle changes: %w", err)
 	}
 
 	err = saveCurrentData(cfg, currentSeries)
@@ -120,6 +138,20 @@ func processSeriesCheck(_ context.Context) (string, error) {
 
 	log.Println("Completed successfully")
 	return "Processing complete", nil
+}
+
+func handleChanges(previousSeries, currentSeries []SeriesData) error {
+	added, removed := compareSeries(previousSeries, currentSeries)
+
+	if len(added) > 0 || len(removed) > 0 {
+		err := postToSlack(buildSlackMessage(added, removed))
+		if err != nil {
+			return fmt.Errorf("failed to notify Slack: %w", err)
+		}
+	} else {
+		log.Println("No changes detected")
+	}
+	return nil
 }
 
 func initAWSConfig() (aws.Config, error) {
@@ -319,9 +351,14 @@ func loadPreviousData(cfg aws.Config) ([]SeriesData, error) {
 
 	result, err := client.GetObject(context.Background(), &s3.GetObjectInput{
 		Bucket: aws.String(appConfig.S3BucketName),
-		Key:    aws.String(appConfig.S3ObjectKey),
+		Key:    aws.String(buildS3Key(appConfig.S3SeriesKey)),
 	})
 	if err != nil {
+		var noSuchKey *types.NoSuchKey
+		if errors.As(err, &noSuchKey) {
+			log.Printf("No previous data found, starting fresh")
+			return []SeriesData{}, nil
+		}
 		return nil, fmt.Errorf("failed to get object from S3: %w", err)
 	}
 	defer result.Body.Close()
@@ -354,7 +391,7 @@ func saveCurrentData(cfg aws.Config, series []SeriesData) error {
 
 	_, err = client.PutObject(context.Background(), &s3.PutObjectInput{
 		Bucket: aws.String(appConfig.S3BucketName),
-		Key:    aws.String(appConfig.S3ObjectKey),
+		Key:    aws.String(buildS3Key(appConfig.S3SeriesKey)),
 		Body:   bytes.NewReader(data),
 	})
 	if err != nil {
@@ -362,6 +399,13 @@ func saveCurrentData(cfg aws.Config, series []SeriesData) error {
 	}
 
 	return nil
+}
+
+func buildS3Key(filename string) string {
+	if appConfig.S3Directory == "" {
+		return filename
+	}
+	return appConfig.S3Directory + "/" + filename
 }
 
 func buildSlackMessage(added, removed []SeriesData) string {
@@ -395,6 +439,7 @@ func alertToSlack(err error) {
 }
 
 func postToSlack(message string) error {
+	log.Printf("Posting to Slack: %s", message)
 	api := slack.New(appConfig.SlackBotToken)
 
 	_, _, err := api.PostMessage(
