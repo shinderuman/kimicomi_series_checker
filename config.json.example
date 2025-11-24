@@ -1,0 +1,7 @@
+{
+	"S3BucketName": "your-s3-bucket-name",
+	"S3ObjectKey": "kimicomi-series.json",
+	"S3Region": "ap-northeast-1",
+	"SlackBotToken": "xoxb-YOUR-SLACK-BOT-TOKEN",
+	"SlackChannel": "YOUR_SLACK_CHANNEL_ID"
+}
