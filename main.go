@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -43,8 +42,6 @@ type Config struct {
 }
 
 var appConfig Config
-
-var days = []string{"月", "火", "水", "木", "金", "土", "日", "その他"}
 
 func main() {
 	if err := initConfig(); err != nil {
@@ -160,14 +157,14 @@ func initAWSConfig() (aws.Config, error) {
 
 func fetchAllSeries() ([]SeriesData, error) {
 	seriesMap := make(map[string]SeriesData)
-
-	for _, day := range days {
-		series, err := fetchSeriesForDay(day)
+	// 1:月, 2:火, 3:水, 4:木, 5:金, 6:土, 7:日, 8:その他
+	for dayID := 1; dayID <= 8; dayID++ {
+		series, err := fetchSeriesForDay(dayID)
 		if err != nil {
-			return nil, fmt.Errorf("failed to fetch series for %s: %w", day, err)
+			return nil, fmt.Errorf("failed to fetch series for dayID %d: %w", dayID, err)
 		}
 
-		log.Printf("Fetched %d series for %s", len(series), day)
+		log.Printf("Fetched %d series for dayID %d", len(series), dayID)
 
 		for _, s := range series {
 			seriesMap[s.ID] = s
@@ -184,12 +181,9 @@ func fetchAllSeries() ([]SeriesData, error) {
 	return result, nil
 }
 
-func fetchSeriesForDay(day string) ([]SeriesData, error) {
-	baseURL := "https://kimicomi.com/category/manga"
-	params := url.Values{}
-	params.Add("type", "連載中")
-	params.Add("day", day)
-	fullURL := baseURL + "?" + params.Encode()
+func fetchSeriesForDay(dayID int) ([]SeriesData, error) {
+	// New URL format: https://kimicomi.com/category/manga/day/{id}/1
+	fullURL := fmt.Sprintf("https://kimicomi.com/category/manga/day/%d/1", dayID)
 
 	resp, err := httpGet(fullURL)
 	if err != nil {
@@ -244,8 +238,8 @@ func extractSeriesFromHTML(htmlContent string) ([]SeriesData, error) {
 			// Check if this is a series link
 			href := ""
 			for _, attr := range n.Attr {
-				if attr.Key == "href" && strings.HasPrefix(attr.Val, "https://kimicomi.com/series/") {
-					href = attr.Val
+				if attr.Key == "href" && strings.HasPrefix(attr.Val, "/series/") {
+					href = "https://kimicomi.com" + attr.Val
 					break
 				}
 			}
@@ -288,7 +282,7 @@ func extractSeriesFromHTML(htmlContent string) ([]SeriesData, error) {
 func findTitleInNode(n *html.Node) string {
 	if n.Type == html.ElementNode && n.Data == "div" {
 		for _, attr := range n.Attr {
-			if attr.Key == "class" && attr.Val == "title-text" {
+			if attr.Key == "class" && attr.Val == "series-list-item-h" {
 				// Get the text content of this div
 				return getTextContent(n)
 			}
